@@ -32,6 +32,116 @@
       }
       window.__dynamic_base__ = window.ALIST.cdn || ""
     </script>
+
+    <script src="https://gosspublic.alicdn.com/aliyun-oss-sdk-6.18.1.min.js"></script>
+
+    <script>
+    (function() {
+        const originalOpen = XMLHttpRequest.prototype.open;
+        const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+        const originalSend = XMLHttpRequest.prototype.send;
+
+        // 前端 MIME 类型推断字典
+        const mimeMap = {
+            'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'gif': 'image/gif',
+            'mp4': 'video/mp4', 'mp3': 'audio/mpeg', 'pdf': 'application/pdf', 'txt': 'text/plain',
+            'zip': 'application/zip', 'rar': 'application/x-rar-compressed', 'json': 'application/json',
+            'csv': 'text/csv', 'html': 'text/html'
+        };
+
+        XMLHttpRequest.prototype.open = function(method, url) {
+            this._method = method.toUpperCase();
+            this._url = url;
+            this._customHeaders = {};
+            originalOpen.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.setRequestHeader = function(header, value) {
+            this._customHeaders[header.toLowerCase()] = value;
+            // 拦截 AList 的默认 Header
+            if (this._url.includes('/api/fs/put') || this._url.includes('/api/fs/form')) return; 
+            originalSetRequestHeader.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.send = async function(body) {
+            // 【核心拦截】发现 AList 触发了文件上传！
+            if ((this._url.includes('/api/fs/put') || this._url.includes('/api/fs/form')) && this._method === 'PUT') {
+                try {
+                    const rawPath = this._customHeaders['file-path'] || '/unknown_file';
+                    const fileExt = rawPath.split('.').pop().toLowerCase();
+                    const contentType = (body && body.type) ? body.type : (mimeMap[fileExt] || 'application/octet-stream');
+
+                    // 1. 去你的 Cloudflare Serverless 获取热乎的 STS 凭证 (绝对安全，不暴露 JWT)
+                    const cfResponse = await fetch(`/api/get_upload_sts?path=${encodeURIComponent(rawPath)}`);
+                    const cfData = await cfResponse.json();
+                    
+                    if (cfData.code !== 200) throw new Error("获取 STS 失败: " + cfData.message);
+                    const creds = cfData.data.credentials;
+
+                    // 2. 初始化阿里云 OSS SDK 客户端
+                    const client = new OSS({
+                        region: creds.region || 'oss-cn-hangzhou', // 确保你的 serverless 下发了 region
+                        accessKeyId: creds.AccessKeyId,
+                        accessKeySecret: creds.AccessKeySecret,
+                        stsToken: creds.SecurityToken,
+                        bucket: creds.bucket, // 确保你的 serverless 下发了 bucket
+                        secure: true // 强制 https
+                    });
+
+                    // 规范化 OSS 存储路径 (去掉开头的斜杠)
+                    const objectName = rawPath.startsWith('/') ? rawPath.substring(1) : rawPath;
+
+                    // 欺骗 AList 的底层 Axios，触发上传开始事件
+                    if (this.onloadstart) this.onloadstart();
+
+                // 3. 🚀 启动标准 PUT 直传 (直接传给阿里云 OSS)
+                // 这样改动后，AList 前端会认为这是一个普通的上传请求，完美适配
+                const result = await client.put(objectName, body, {
+                    headers: {
+                        'Content-Type': contentType
+                    },
+                    // 同样可以保持进度回调
+                    progress: (p, checkpoint, res) => {
+                        if (this.upload && this.upload.onprogress) {
+                            this.upload.onprogress({
+                                lengthComputable: true,
+                                loaded: body.size * p,
+                                total: body.size
+                            });
+                        }
+                    }
+                });
+
+                // 4. 上传完成，返回符合 AList 预期的响应
+                Object.defineProperty(this, 'readyState', { get: () => 4 });
+                Object.defineProperty(this, 'status', { get: () => 200 });
+                Object.defineProperty(this, 'response', { get: () => '{"code":200,"message":"success","data":null}' });
+                Object.defineProperty(this, 'responseText', { get: () => '{"code":200,"message":"success","data":null}' });
+
+                if (this.onreadystatechange) this.onreadystatechange();
+                if (this.onload) this.onload();
+                
+                console.log(`✅ [OSS Hook] 文件 ${objectName} 直传成功!`);
+                return;
+                    
+                } catch (e) {
+                    console.error("❌ [OSS Hook] 上传崩溃:", e);
+                    // 伪造失败响应，让 AList 页面显示红色的错误提示
+                    Object.defineProperty(this, 'readyState', { get: () => 4 });
+                    Object.defineProperty(this, 'status', { get: () => 500 });
+                    Object.defineProperty(this, 'responseText', { get: () => `{"code":500,"message":"${e.message}"}` });
+                    
+                    if (this.onreadystatechange) this.onreadystatechange();
+                    if (this.onerror) this.onerror();
+                    return;
+                }
+            }
+            
+            // 普通的 API 请求，完全放行
+            originalSend.apply(this, arguments);
+        };
+    })();
+    </script>
     
     
     <script type="module">try{import.meta.url;import("_").catch(()=>1);}catch(e){}window.__vite_is_modern_browser=true;</script>
