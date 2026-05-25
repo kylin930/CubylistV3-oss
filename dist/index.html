@@ -35,136 +35,140 @@
 
     <script src="https://gosspublic.alicdn.com/aliyun-oss-sdk-6.18.1.min.js"></script>
 
-<script>
-(function() {
-    const originalOpen = XMLHttpRequest.prototype.open;
-    const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
-    const originalSend = XMLHttpRequest.prototype.send;
+    <script>
+    (function() {
+        const originalOpen = XMLHttpRequest.prototype.open;
+        const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+        const originalSend = XMLHttpRequest.prototype.send;
 
-    const mimeMap = {
-        'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'gif': 'image/gif',
-        'mp4': 'video/mp4', 'mp3': 'audio/mpeg', 'pdf': 'application/pdf', 'txt': 'text/plain',
-        'zip': 'application/zip', 'rar': 'application/x-rar-compressed', 'json': 'application/json',
-        'csv': 'text/csv', 'html': 'text/html'
-    };
+        const mimeMap = {
+            'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'gif': 'image/gif',
+            'mp4': 'video/mp4', 'mp3': 'audio/mpeg', 'pdf': 'application/pdf', 'txt': 'text/plain',
+            'zip': 'application/zip', 'rar': 'application/x-rar-compressed', 'json': 'application/json',
+            'csv': 'text/csv', 'html': 'text/html'
+        };
 
-    function generateCleanUUID() {
-        return 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'.replace(/[x]/g, function() {
-            return (Math.random() * 16 | 0).toString(16);
-        });
-    }
-
-    XMLHttpRequest.prototype.open = function(method, url) {
-        this._method = method.toUpperCase();
-        this._url = url;
-        this._customHeaders = {};
-        originalOpen.apply(this, arguments);
-    };
-
-    XMLHttpRequest.prototype.setRequestHeader = function(header, value) {
-        this._customHeaders[header.toLowerCase()] = value;
-        if (this._url.includes('/api/fs/put') || this._url.includes('/api/fs/form')) return; 
-        originalSetRequestHeader.apply(this, arguments);
-    };
-
-    XMLHttpRequest.prototype.send = async function(body) {
-        if ((this._url.includes('/api/fs/put') || this._url.includes('/api/fs/form')) && this._method === 'PUT') {
-            try {
-                const rawPath = this._customHeaders['file-path'] || '/unknown_file';
-                
-                // 拆解路径
-                const lastSlashIndex = rawPath.lastIndexOf('/');
-                const fileDir = rawPath.substring(0, lastSlashIndex + 1); // AList 里的多级目录，例如 "/电影/动漫/"
-                const fullFileName = rawPath.substring(lastSlashIndex + 1); // 原始文件名，例如 "avatar.jpg"
-
-                const lastDotIndex = fullFileName.lastIndexOf('.');
-                const nameWithoutExt = lastDotIndex !== -1 ? fullFileName.substring(0, lastDotIndex) : fullFileName;
-                const fileExt = lastDotIndex !== -1 ? fullFileName.substring(lastDotIndex) : '';
-
-                const timestamp = Date.now();
-                const cleanUuid = generateCleanUUID();
-                
-                // 【绝妙改动点】：
-                // 1. 在 AList 虚拟世界里，保持完整多级路径，用来归档入库到 KV
-                const finalVirtualPath = fileDir + fullFileName; 
-                
-                // 2. 在真实 OSS 世界里，丢弃 fileDir 目录结构，直接硬编码在第一级根目录下！
-                const ossObjectKey = `${nameWithoutExt}_${timestamp}_${cleanUuid}${fileExt}`; 
-
-                // 获取 MIME Content-Type
-                const extPure = fileExt.replace('.', '').toLowerCase();
-                const contentType = (body && body.type) ? body.type : (mimeMap[extPure] || 'application/octet-stream');
-
-                // 请求 Serverless 获取临时凭证 (path 透传原多级用于安全审计)
-                const cfResponse = await fetch(`/api/get_upload_sts?path=${encodeURIComponent(finalVirtualPath)}`);
-                const cfData = await cfResponse.json();
-                if (cfData.code !== 200) throw new Error("获取 STS 失败: " + cfData.message);
-                const creds = cfData.data.credentials;
-
-                // 初始化 OSS 客户端
-                const client = new OSS({
-                    region: creds.region || 'oss-cn-hangzhou',
-                    accessKeyId: creds.AccessKeyId,
-                    accessKeySecret: creds.AccessKeySecret,
-                    stsToken: creds.SecurityToken,
-                    bucket: creds.bucket,
-                    secure: true
-                });
-
-                if (this.onloadstart) this.onloadstart();
-
-                // 🚀 真实直传 OSS 第一级根目录
-                await client.put(ossObjectKey, body, {
-                    headers: { 'Content-Type': contentType },
-                    progress: (p) => {
-                        if (this.upload && this.upload.onprogress) {
-                            this.upload.onprogress({ lengthComputable: true, loaded: body.size * p, total: body.size });
-                        }
-                    }
-                });
-
-                // 🚀 元数据登记：把多级网盘路径和位于根目录的真实 oss_key 强绑定绑定并上报
-                await fetch('/api/fs/register_file', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        path: finalVirtualPath, 
-                        name: fullFileName,     
-                        size: body.size,
-                        oss_key: ossObjectKey // 极度核心：告诉 get.js 去根目录读取此随机无斜杠的文件名
-                    })
-                });
-
-                // 关闭状态机，闭合进度条
-                if (this.upload && this.upload.onprogress) {
-                    this.upload.onprogress({ lengthComputable: true, loaded: body.size, total: body.size });
-                }
-
-                Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
-                Object.defineProperty(this, 'status', { get: () => 200, configurable: true });
-                Object.defineProperty(this, 'response', { get: () => '{"code":200,"message":"success","data":null}', configurable: true });
-                Object.defineProperty(this, 'responseText', { get: () => '{"code":200,"message":"success","data":null}', configurable: true });
-
-                if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
-                if (typeof this.onload === 'function') this.onload();
-                this.dispatchEvent(new Event('readystatechange'));
-                this.dispatchEvent(new Event('load'));
-                return;
-
-            } catch (e) {
-                console.error("❌ [OSS Hook] 上传链条发生异常:", e);
-                Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
-                Object.defineProperty(this, 'status', { get: () => 500, configurable: true });
-                Object.defineProperty(this, 'responseText', { get: () => `{"code":500,"message":"${e.message}"}`, configurable: true });
-                if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
-                if (this.onerror) this.onerror();
-                return;
-            }
+        function generateCleanUUID() {
+            return 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'.replace(/[x]/g, function() {
+                return (Math.random() * 16 | 0).toString(16);
+            });
         }
-        originalSend.apply(this, arguments);
-    };
-})();
-</script>
+
+        XMLHttpRequest.prototype.open = function(method, url) {
+            this._method = method.toUpperCase();
+            this._url = url;
+            this._customHeaders = {};
+            originalOpen.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.setRequestHeader = function(header, value) {
+            this._customHeaders[header.toLowerCase()] = value;
+            if (this._url.includes('/api/fs/put') || this._url.includes('/api/fs/form')) return; 
+            originalSetRequestHeader.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.send = async function(body) {
+            if ((this._url.includes('/api/fs/put') || this._url.includes('/api/fs/form')) && this._method === 'PUT') {
+                try {
+                    const headerPath = this._customHeaders['file-path'] || '/unknown_file';
+                    
+                    // ==========================================
+                    // 🚀 前端级加固：强制将可能携带的 %2F 完全解码回斜杠
+                    // ==========================================
+                    const rawPath = decodeURIComponent(headerPath);
+                    
+                    // 拆解纯净路径
+                    const lastSlashIndex = rawPath.lastIndexOf('/');
+                    const fileDir = rawPath.substring(0, lastSlashIndex + 1); // 例如 "/91/"
+                    const fullFileName = rawPath.substring(lastSlashIndex + 1); // 例如 "89990698_p0_master1200.jpg"
+
+                    const lastDotIndex = fullFileName.lastIndexOf('.');
+                    const nameWithoutExt = lastDotIndex !== -1 ? fullFileName.substring(0, lastDotIndex) : fullFileName;
+                    const fileExt = lastDotIndex !== -1 ? fullFileName.substring(lastDotIndex) : '';
+
+                    const timestamp = Date.now();
+                    const cleanUuid = generateCleanUUID();
+                    
+                    // 计算纯净的文件名
+                    const newFileName = `${nameWithoutExt}_${timestamp}_${cleanUuid}${fileExt}`;
+                    const finalVirtualPath = fileDir + fullFileName; // 网盘呈现的纯净多级虚拟地址
+                    const ossObjectKey = newFileName; // 🚨 锁死：OSS 真实端剥离一切层级，只是一个纯粹的不带斜杠的文件名！
+
+                    const extPure = fileExt.replace('.', '').toLowerCase();
+                    const contentType = (body && body.type) ? body.type : (mimeMap[extPure] || 'application/octet-stream');
+
+                    // 向云函数要凭证 (path参数传未处理的原URL保证兼容)
+                    const cfResponse = await fetch(`/api/get_upload_sts?path=${encodeURIComponent(finalVirtualPath)}`);
+                    const cfData = await cfResponse.json();
+                    if (cfData.code !== 200) throw new Error("获取 STS 失败: " + cfData.message);
+                    const creds = cfData.data.credentials;
+
+                    // 初始化 OSS 客户端
+                    const client = new OSS({
+                        region: creds.region || 'oss-cn-hangzhou',
+                        accessKeyId: creds.AccessKeyId,
+                        accessKeySecret: creds.AccessKeySecret,
+                        stsToken: creds.SecurityToken,
+                        bucket: creds.bucket,
+                        secure: true
+                    });
+
+                    if (this.onloadstart) this.onloadstart();
+
+                    // 真实推入 OSS 根目录（由于 ossObjectKey 是纯文件名，绝对不带任何斜杠和多级目录前缀）
+                    await client.put(ossObjectKey, body, {
+                        headers: { 'Content-Type': contentType },
+                        progress: (p) => {
+                            if (this.upload && this.upload.onprogress) {
+                                this.upload.onprogress({ lengthComputable: true, loaded: body.size * p, total: body.size });
+                            }
+                        }
+                    });
+
+                    // ==========================================
+                    // 🚀 核心修复：上报时，不要再次进行多重 URL 编码
+                    // ==========================================
+                    await fetch('/api/fs/register_file', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            path: finalVirtualPath, // 发送没有 %2F 的纯净字符串 "/91/xxx.jpg"
+                            name: fullFileName,     // 发送纯净字符串 "xxx.jpg"
+                            size: body.size,
+                            oss_key: ossObjectKey   // 发送没有层级的纯净随机文件名
+                        })
+                    });
+
+                    // 状态机终结
+                    if (this.upload && this.upload.onprogress) {
+                        this.upload.onprogress({ lengthComputable: true, loaded: body.size, total: body.size });
+                    }
+
+                    Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
+                    Object.defineProperty(this, 'status', { get: () => 200, configurable: true });
+                    Object.defineProperty(this, 'response', { get: () => '{"code":200,"message":"success","data":null}', configurable: true });
+                    Object.defineProperty(this, 'responseText', { get: () => '{"code":200,"message":"success","data":null}', configurable: true });
+
+                    if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
+                    if (typeof this.onload === 'function') this.onload();
+                    this.dispatchEvent(new Event('readystatechange'));
+                    this.dispatchEvent(new Event('load'));
+                    return;
+
+                } catch (e) {
+                    console.error("❌ [OSS Hook] 上传链条发生异常:", e);
+                    Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
+                    Object.defineProperty(this, 'status', { get: () => 500, configurable: true });
+                    Object.defineProperty(this, 'responseText', { get: () => `{"code":500,"message":"${e.message}"}`, configurable: true });
+                    if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
+                    if (this.onerror) this.onerror();
+                    return;
+                }
+            }
+            originalSend.apply(this, arguments);
+        };
+    })();
+    </script>
     
     
     <script type="module">try{import.meta.url;import("_").catch(()=>1);}catch(e){}window.__vite_is_modern_browser=true;</script>
