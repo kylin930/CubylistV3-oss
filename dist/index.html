@@ -48,7 +48,6 @@
         'csv': 'text/csv', 'html': 'text/html'
     };
 
-    // 高效纯 JS 生成 32 位无连接符的随机 UUID
     function generateCleanUUID() {
         return 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'.replace(/[x]/g, function() {
             return (Math.random() * 16 | 0).toString(16);
@@ -69,17 +68,14 @@
     };
 
     XMLHttpRequest.prototype.send = async function(body) {
-        // 核心拦截：发现 AList 触发了文件 PUT 上传
         if ((this._url.includes('/api/fs/put') || this._url.includes('/api/fs/form')) && this._method === 'PUT') {
             try {
                 const rawPath = this._customHeaders['file-path'] || '/unknown_file';
                 
-                // ==========================================
-                // 1. 核心改动：文件名重塑（注入时间戳与无连接符UUID）
-                // ==========================================
+                // 拆解路径
                 const lastSlashIndex = rawPath.lastIndexOf('/');
-                const fileDir = rawPath.substring(0, lastSlashIndex + 1); // 例如 "/docs/"
-                const fullFileName = rawPath.substring(lastSlashIndex + 1); // 例如 "avatar.jpg"
+                const fileDir = rawPath.substring(0, lastSlashIndex + 1); // AList 里的多级目录，例如 "/电影/动漫/"
+                const fullFileName = rawPath.substring(lastSlashIndex + 1); // 原始文件名，例如 "avatar.jpg"
 
                 const lastDotIndex = fullFileName.lastIndexOf('.');
                 const nameWithoutExt = lastDotIndex !== -1 ? fullFileName.substring(0, lastDotIndex) : fullFileName;
@@ -88,22 +84,24 @@
                 const timestamp = Date.now();
                 const cleanUuid = generateCleanUUID();
                 
-                // 拼接新虚拟网盘路径与真实存储在 OSS 的 ObjectKey
-                const newFileName = `${nameWithoutExt}_${timestamp}_${cleanUuid}${fileExt}`;
-                const finalVirtualPath = fileDir + fullFileName; // 保持前端渲染看到的依然是原文件名
-                const ossObjectKey = fileDir + newFileName; // 真实上传到 OSS 的唯一不重复文件名
+                // 【绝妙改动点】：
+                // 1. 在 AList 虚拟世界里，保持完整多级路径，用来归档入库到 KV
+                const finalVirtualPath = fileDir + fullFileName; 
+                
+                // 2. 在真实 OSS 世界里，丢弃 fileDir 目录结构，直接硬编码在第一级根目录下！
+                const ossObjectKey = `${nameWithoutExt}_${timestamp}_${cleanUuid}${fileExt}`; 
 
-                // 获取精准 Content-Type
+                // 获取 MIME Content-Type
                 const extPure = fileExt.replace('.', '').toLowerCase();
                 const contentType = (body && body.type) ? body.type : (mimeMap[extPure] || 'application/octet-stream');
 
-                // 2. 请求 Serverless 换取临时 STS 凭证
+                // 请求 Serverless 获取临时凭证 (path 透传原多级用于安全审计)
                 const cfResponse = await fetch(`/api/get_upload_sts?path=${encodeURIComponent(finalVirtualPath)}`);
                 const cfData = await cfResponse.json();
                 if (cfData.code !== 200) throw new Error("获取 STS 失败: " + cfData.message);
                 const creds = cfData.data.credentials;
 
-                // 3. 初始化 OSS 客户端
+                // 初始化 OSS 客户端
                 const client = new OSS({
                     region: creds.region || 'oss-cn-hangzhou',
                     accessKeyId: creds.AccessKeyId,
@@ -113,78 +111,56 @@
                     secure: true
                 });
 
-                // 规范化去掉 OSS 路径开头的斜杠
-                const cleanOssKey = ossObjectKey.startsWith('/') ? ossObjectKey.substring(1) : ossObjectKey;
-
-                // 触发 AList 上传 UI 起步
                 if (this.onloadstart) this.onloadstart();
 
-                // 4. 执行不切片标准 PUT 直传
-                await client.put(cleanOssKey, body, {
+                // 🚀 真实直传 OSS 第一级根目录
+                await client.put(ossObjectKey, body, {
                     headers: { 'Content-Type': contentType },
                     progress: (p) => {
-                        // 动态回传进度，让网页进度条丝滑滚动
                         if (this.upload && this.upload.onprogress) {
-                            this.upload.onprogress({
-                                lengthComputable: true,
-                                loaded: body.size * p,
-                                total: body.size
-                            });
+                            this.upload.onprogress({ lengthComputable: true, loaded: body.size * p, total: body.size });
                         }
                     }
                 });
 
-                // ==========================================
-                // 5. 核心改动：把刚传完的元数据，同步上报给云函数写入 KV
-                // ==========================================
+                // 🚀 元数据登记：把多级网盘路径和位于根目录的真实 oss_key 强绑定绑定并上报
                 await fetch('/api/fs/register_file', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        path: finalVirtualPath, // AList 里看的路径
-                        name: fullFileName,     // AList 里看的文件名
+                        path: finalVirtualPath, 
+                        name: fullFileName,     
                         size: body.size,
-                        oss_key: cleanOssKey    // 极其关键：告诉 get.js 下载时去读哪一个真文件
+                        oss_key: ossObjectKey // 极度核心：告诉 get.js 去根目录读取此随机无斜杠的文件名
                     })
                 });
 
-                // ==========================================
-                // 6. 核心改动：完美终结重塑状态机，欺骗并通知 Axios 结束
-                // ==========================================
-                // 强制拉满最后的进度条
+                // 关闭状态机，闭合进度条
                 if (this.upload && this.upload.onprogress) {
                     this.upload.onprogress({ lengthComputable: true, loaded: body.size, total: body.size });
                 }
 
-                // 锁定 XHR 成功状态字段值
                 Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
                 Object.defineProperty(this, 'status', { get: () => 200, configurable: true });
                 Object.defineProperty(this, 'response', { get: () => '{"code":200,"message":"success","data":null}', configurable: true });
                 Object.defineProperty(this, 'responseText', { get: () => '{"code":200,"message":"success","data":null}', configurable: true });
 
-                // 💡 核心突破点：同时分发回调与标准 DOM 监听事件，彻底关闭上传弹窗并触发 AList 刷新
                 if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
                 if (typeof this.onload === 'function') this.onload();
-                
                 this.dispatchEvent(new Event('readystatechange'));
                 this.dispatchEvent(new Event('load'));
-                
-                console.log(`\u2705 [OSS Hook] ${fullFileName} 重命名直传并同步 KV 成功!`);
-                return; // 🛑 绝对不要调用 originalSend，彻底切断底层物理发包过程
+                return;
 
             } catch (e) {
-                console.error("\u274c [OSS Hook] 上传链条发生异常:", e);
+                console.error("❌ [OSS Hook] 上传链条发生异常:", e);
                 Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
                 Object.defineProperty(this, 'status', { get: () => 500, configurable: true });
                 Object.defineProperty(this, 'responseText', { get: () => `{"code":500,"message":"${e.message}"}`, configurable: true });
-                
                 if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
                 if (this.onerror) this.onerror();
                 return;
             }
         }
-        
-        // 其它普通请求全部原样放行
         originalSend.apply(this, arguments);
     };
 })();
