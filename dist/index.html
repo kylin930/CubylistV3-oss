@@ -169,6 +169,37 @@
         };
     })();
     </script>
+
+    <script>
+    (function() {
+        // 监听全局点击事件，拦截所有带有“下载”特征的点击
+        document.addEventListener('click', function(e) {
+            // 查找点击目标是否是 AList 的下载按钮 (AList 下载按钮通常包含 download 或类似的类名/图标)
+            const target = e.target.closest('a') || e.target.closest('button');
+            if (!target) return;
+
+            // 检查这个链接是否指向我们的 OSS 直链
+            const href = target.href || '';
+            if (href.includes('aliyuncs.com')) {
+                // 拦截默认的打开行为
+                e.preventDefault();
+                e.stopPropagation();
+
+                // 强行拼接阿里云强制下载参数
+                // attachment; filename=文件名.后缀
+                const downloadUrl = href + (href.includes('?') ? '&' : '?') + 'response-content-disposition=attachment';
+
+                // 创建一个隐藏的下载链接并模拟点击
+                const a = document.createElement('a');
+                a.href = downloadUrl;
+                a.download = ''; // 触发浏览器下载
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            }
+        }, true); // 使用捕获模式，确保优先级最高
+    })();
+    </script>
     
     
     <script type="module">try{import.meta.url;import("_").catch(()=>1);}catch(e){}window.__vite_is_modern_browser=true;</script>
