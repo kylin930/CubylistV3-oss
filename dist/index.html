@@ -49,17 +49,14 @@
         };
 
         // ==========================================
-        // 🚀 新增：STS 凭证全局预热与自动续期池
+        // 🚀 核心优化 1：STS 凭证全局预热与自动续期池
         // ==========================================
         let globalStsCredentials = null;
         let isFetchingSts = false;
         let stsPromise = null;
 
         async function ensureStsCredentials() {
-            // 如果内存里已经有了热乎的凭证，秒回！
             if (globalStsCredentials) return globalStsCredentials;
-            
-            // 防并发：如果正在获取中，等待同一个 Promise
             if (isFetchingSts) return await stsPromise;
 
             isFetchingSts = true;
@@ -68,39 +65,25 @@
                 .then(data => {
                     if (data.code !== 200) throw new Error(data.message);
                     globalStsCredentials = data.data.credentials;
-                    console.log("✅ [STS Pool] STS 凭证预热/续期成功！");
+                    console.log("✅ [STS Pool] 凭证预热就绪，可以零延迟直传！");
                     return globalStsCredentials;
                 })
                 .catch(err => {
-                    console.error("❌ [STS Pool] 凭证获取失败:", err);
                     globalStsCredentials = null;
                     throw err;
                 })
-                .finally(() => {
-                    isFetchingSts = false;
-                });
+                .finally(() => { isFetchingSts = false; });
             
             return await stsPromise;
         }
 
-        // 页面加载时立即静默预热
+        // 页面加载瞬间启动后台取 STS
         ensureStsCredentials().catch(()=>{});
-        
-        // 设置定时器，每 15 分钟（900000 毫秒）强行清空并刷新一次凭证，保证永不过期
+        // 每 15 分钟强行续期一次，保鲜
         setInterval(() => {
             globalStsCredentials = null;
             ensureStsCredentials().catch(()=>{});
         }, 900000);
-
-
-        function generateTaskId() {
-            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-            let result = '';
-            for (let i = 0; i < 11; i++) {
-                result += chars.charAt(Math.floor(Math.random() * chars.length));
-            }
-            return result;
-        }
 
         function generateCleanUUID() {
             return 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'.replace(/[x]/g, function() {
@@ -123,6 +106,22 @@
 
         XMLHttpRequest.prototype.send = async function(body) {
             if ((this._url.includes('/api/fs/put') || this._url.includes('/api/fs/form')) && this._method === 'PUT') {
+                
+                // ==========================================
+                // 🚀 核心优化 2：原生 ProgressEvent 事件分发机
+                // ==========================================
+                const dispatchProgress = (p) => {
+                    if (this.upload) {
+                        const loaded = Math.round(body.size * p);
+                        // 必须 dispatch 标准的 ProgressEvent，Axios 才能监听到！
+                        this.upload.dispatchEvent(new ProgressEvent('progress', {
+                            lengthComputable: true,
+                            loaded: loaded,
+                            total: body.size
+                        }));
+                    }
+                };
+
                 try {
                     const headerPath = this._customHeaders['file-path'] || '/unknown_file';
                     const rawPath = decodeURIComponent(decodeURIComponent(headerPath));
@@ -136,19 +135,14 @@
                     const nameWithoutExt = lastDotIndex !== -1 ? fullFileName.substring(0, lastDotIndex) : fullFileName;
                     const fileExt = lastDotIndex !== -1 ? fullFileName.substring(lastDotIndex) : '';
 
-                    const timestamp = Date.now();
-                    const cleanUuid = generateCleanUUID();
-                    
-                    const newFileName = `${nameWithoutExt}_${timestamp}_${cleanUuid}${fileExt}`;
+                    const newFileName = `${nameWithoutExt}_${Date.now()}_${generateCleanUUID()}${fileExt}`;
                     const finalVirtualPath = fileDir + fullFileName; 
                     const ossObjectKey = newFileName; 
 
                     const extPure = fileExt.replace('.', '').toLowerCase();
                     const contentType = (body && body.type) ? body.type : (mimeMap[extPure] || 'application/octet-stream');
 
-                    // ==========================================
-                    // 🚀 零延迟：秒取预热好的 STS
-                    // ==========================================
+                    // 零延迟秒取 STS
                     const creds = await ensureStsCredentials();
 
                     const client = new OSS({
@@ -160,20 +154,18 @@
                         secure: true
                     });
 
-                    // AList 界面立即启动
-                    if (this.onloadstart) this.onloadstart();
+                    // 触发 Axios 开始上传的初始事件
+                    if (this.upload) this.upload.dispatchEvent(new ProgressEvent('loadstart'));
 
-                    // 立即推流，没有任何额外的网络等待阻滞！
+                    // 直传推流
                     await client.put(ossObjectKey, body, {
                         headers: { 'Content-Type': contentType },
-                        progress: (p) => {
-                            if (this.upload && this.upload.onprogress) {
-                                this.upload.onprogress({ lengthComputable: true, loaded: body.size * p, total: body.size });
-                            }
+                        progress: function (p) {
+                            dispatchProgress(p); // 丝滑推进进度条
                         }
                     });
 
-                    // 上报 KV 数据库
+                    // 上报 KV
                     await fetch('/api/fs/register_file', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -185,49 +177,38 @@
                         })
                     });
 
-                    if (this.upload && this.upload.onprogress) {
-                        this.upload.onprogress({ lengthComputable: true, loaded: body.size, total: body.size });
-                    }
+                    // 强制进度条100%并触发上传结束事件
+                    dispatchProgress(1);
+                    if (this.upload) this.upload.dispatchEvent(new ProgressEvent('loadend'));
 
-                    // 伪造完整的官方 OpenAPI Task 成功报文
-                    const mockTaskId = generateTaskId();
-                    const mockTaskResponse = {
-                        "code": 200,
-                        "message": "success",
-                        "data": {
-                            "task": {
-                                "id": mockTaskId,
-                                "name": `upload ${fullFileName} to [${fileDir}]`,
-                                "state": 2, 
-                                "status": "succeeded",
-                                "progress": 100,
-                                "error": ""
-                            }
-                        }
-                    };
-
-                    const jsonResultString = JSON.stringify(mockTaskResponse);
+                    // ==========================================
+                    // 🚀 核心优化 3：回归 44 字节极简响应 + 状态机闭合
+                    // ==========================================
+                    const jsonResultString = '{"code":200,"message":"success","data":null}';
 
                     Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
                     Object.defineProperty(this, 'status', { get: () => 200, configurable: true });
+                    Object.defineProperty(this, 'statusText', { get: () => 'OK', configurable: true });
                     Object.defineProperty(this, 'response', { get: () => jsonResultString, configurable: true });
                     Object.defineProperty(this, 'responseText', { get: () => jsonResultString, configurable: true });
 
-                    if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
-                    if (typeof this.onload === 'function') this.onload();
+                    // 触发底层 XHR 的全套收尾事件，让 Axios 感知到 HTTP 200 OK 彻底结束
                     this.dispatchEvent(new Event('readystatechange'));
-                    this.dispatchEvent(new Event('load'));
+                    this.dispatchEvent(new ProgressEvent('load'));
+                    this.dispatchEvent(new ProgressEvent('loadend'));
                     
-                    console.log(`\u2705 [OSS Task Hook] ${fullFileName} 直传完成!`);
+                    console.log(`\u2705 [OSS Hook] ${fullFileName} 零延迟直传成功!`);
                     return; 
 
                 } catch (e) {
-                    console.error("\u274c [OSS Task Hook] 上传发生异常:", e);
+                    console.error("\u274c [OSS Hook] 发生异常:", e);
                     Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
                     Object.defineProperty(this, 'status', { get: () => 500, configurable: true });
                     Object.defineProperty(this, 'responseText', { get: () => `{"code":500,"message":"${e.message}","data":null}`, configurable: true });
-                    if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
-                    if (this.onerror) this.onerror();
+                    
+                    this.dispatchEvent(new Event('readystatechange'));
+                    this.dispatchEvent(new ProgressEvent('error'));
+                    this.dispatchEvent(new ProgressEvent('loadend'));
                     return;
                 }
             }
