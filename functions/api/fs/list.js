@@ -12,6 +12,12 @@ export async function onRequest(context) {
     }
 
     try {
+        const authHeader = context.request.headers.get("Authorization") || "";
+        const expectedAdminToken = context.env.ADMIN_TOKEN || "secret-admin-token-cf-alist-v3";
+        
+        // 判定当前操作者是否为合法的管理员
+        const isAdmin = (authHeader === expectedAdminToken || authHeader === `Bearer ${expectedAdminToken}`);
+
         // 解析前端传来的 POST 请求体
         const requestBody = await context.request.json();
         let { path } = requestBody;
@@ -20,29 +26,22 @@ export async function onRequest(context) {
             path = "/";
         }
 
-        // 规范化路径：确保以 / 开头，且非根目录去除末尾的 /
-        if (!path.startsWith("/")) {
-            path = "/" + path;
+        // 规范化路径结构，强制解码防乱码
+        let decodedPath = decodeURIComponent(decodeURIComponent(path));
+        if (!decodedPath.startsWith("/")) {
+            decodedPath = "/" + decodedPath;
         }
-        if (path.length > 1 && path.endsWith("/")) {
-            path = path.slice(0, -1);
+        if (decodedPath.length > 1 && decodedPath.endsWith("/")) {
+            decodedPath = decodedPath.slice(0, -1);
         }
 
-        // 检查 Cloudflare KV 命名空间绑定状态
         const kvNamespace = context.env.ALIST_KV;
         if (!kvNamespace) {
-            return new Response(JSON.stringify({
-                code: 500,
-                message: "Cloudflare KV binding 'ALIST_KV' is missing in environment.",
-                data: null
-            }), {
-                status: 500,
-                headers: { "Content-Type": "application/json;charset=utf-8", "Access-Control-Allow-Origin": "*" }
-            });
+            throw new Error("ALIST_KV namespace is not bound.");
         }
 
-        // 从 KV 获取对应目录下的文件列表
-        const kvKey = `dir:${path}`;
+        // 从 KV 获取对应目录下的虚拟目录树
+        const kvKey = `dir:${decodedPath}`;
         const dirDataStr = await kvNamespace.get(kvKey);
 
         let content = [];
@@ -50,10 +49,9 @@ export async function onRequest(context) {
             content = JSON.parse(dirDataStr);
         }
 
-        // 严格映射数据字段，100% 适配 AList 前端渲染诉求
+        // 严格映射数据字段
         const formattedContent = content.map(item => {
-            // 计算单项的完整虚拟路径
-            const itemPath = item.path || (path === "/" ? `/${item.name}` : `${path}/${item.name}`);
+            const itemPath = item.path || (decodedPath === "/" ? `/${item.name}` : `${decodedPath}/${item.name}`);
             return {
                 id: item.id || "",
                 path: itemPath,
@@ -64,7 +62,7 @@ export async function onRequest(context) {
                 created: item.created || item.modified || new Date().toISOString(),
                 sign: item.sign || "",
                 thumb: item.thumb || "",
-                type: item.type || (item.is_dir ? 1 : 0), // 1 为文件夹，其他根据文件类型映射
+                type: item.type || (item.is_dir ? 1 : 0),
                 hashinfo: "null",
                 hash_info: null,
                 label_list: null
@@ -79,7 +77,7 @@ export async function onRequest(context) {
                 "content": formattedContent,
                 "total": formattedContent.length,
                 "readme": "",
-                "write": true, // 允许网页端触发上传/创建管理逻辑
+                "write": isAdmin, 
                 "provider": "Cloudflare KV"
             }
         };
@@ -88,14 +86,15 @@ export async function onRequest(context) {
             status: 200,
             headers: {
                 "Content-Type": "application/json;charset=utf-8",
-                "Access-Control-Allow-Origin": "*"
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-store" // 列表也禁缓存，防止多设备角色权限被节点误缓存缓存
             }
         });
 
     } catch (error) {
         return new Response(JSON.stringify({
             code: 500,
-            message: "Internal Server Error: " + error.message,
+            message: "List VFS Error: " + error.message,
             data: null
         }), {
             status: 500,
