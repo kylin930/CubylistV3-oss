@@ -48,23 +48,45 @@
             'csv': 'text/csv', 'html': 'text/html'
         };
 
+        // ==========================================
+        // STS 凭证全局预热与自动续期池
+        // ==========================================
         let globalStsCredentials = null;
         let isFetchingSts = false;
         let stsPromise = null;
+
+        // 从浏览器本地存储中捞出 AList 的登录令牌
+        function getAlistToken() {
+            return window.localStorage.getItem('alist_token') || '';
+        }
 
         async function ensureStsCredentials() {
             if (globalStsCredentials) return globalStsCredentials;
             if (isFetchingSts) return await stsPromise;
 
+            const currentToken = getAlistToken();
+            // 核心拦截：如果连本地 Token 都没有（游客），根本就不去向后端要 STS，直接掐断
+            if (!currentToken) {
+                throw new Error("Unauthorized guest: Token not found locally.");
+            }
+
             isFetchingSts = true;
-            stsPromise = fetch('/api/get_upload_sts?path=/')
+            stsPromise = fetch('/api/get_upload_sts?path=/', {
+                method: 'GET',
+                headers: {
+                    // 核心修复：把捞出来的身份令牌戴在头上！
+                    'Authorization': currentToken
+                }
+            })
                 .then(res => res.json())
                 .then(data => {
                     if (data.code !== 200) throw new Error(data.message);
                     globalStsCredentials = data.data.credentials;
+                    console.log("[STS Pool] 管理员凭证预热就绪，可以直传！");
                     return globalStsCredentials;
                 })
                 .catch(err => {
+                    console.error("[STS Pool] 凭证获取失败:", err);
                     globalStsCredentials = null;
                     throw err;
                 })
@@ -73,7 +95,10 @@
             return await stsPromise;
         }
 
+        // 页面加载瞬间启动后台取 STS
         ensureStsCredentials().catch(()=>{});
+        
+        // 每 15 分钟强行清空并续期一次
         setInterval(() => {
             globalStsCredentials = null;
             ensureStsCredentials().catch(()=>{});
