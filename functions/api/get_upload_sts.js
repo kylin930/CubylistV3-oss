@@ -65,7 +65,7 @@ export async function onRequest(context) {
             if (!currentJwt) throw new Error("KV中检索到的JWT数据层级或格式有误。");
 
             // 完全对齐 Python 请求逻辑，赴目标接口以 JWT 兑换临时高安全 OSS 凭证
-            const stsApiUrl = "https://api.wxzxzj.com/api/tool/upload/getStsToken"; 
+            const stsApiUrl = env.STSAPIUrl; 
             const stsResponse = await fetch(stsApiUrl, {
                 method: "GET",
                 headers: {
