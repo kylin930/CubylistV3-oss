@@ -48,6 +48,16 @@
             'csv': 'text/csv', 'html': 'text/html'
         };
 
+        // 生成随机 11 位 AList 风格 Task ID
+        function generateTaskId() {
+            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+            let result = '';
+            for (let i = 0; i < 11; i++) {
+                result += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            return result;
+        }
+
         function generateCleanUUID() {
             return 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'.replace(/[x]/g, function() {
                 return (Math.random() * 16 | 0).toString(16);
@@ -72,15 +82,14 @@
                 try {
                     const headerPath = this._customHeaders['file-path'] || '/unknown_file';
                     
-                    // ==========================================
-                    // 🚀 前端级加固：强制将可能携带的 %2F 完全解码回斜杠
-                    // ==========================================
-                    const rawPath = decodeURIComponent(headerPath);
+                    // 彻底解码路径
+                    const rawPath = decodeURIComponent(decodeURIComponent(headerPath));
                     
                     // 拆解纯净路径
                     const lastSlashIndex = rawPath.lastIndexOf('/');
-                    const fileDir = rawPath.substring(0, lastSlashIndex + 1); // 例如 "/91/"
-                    const fullFileName = rawPath.substring(lastSlashIndex + 1); // 例如 "89990698_p0_master1200.jpg"
+                    const fileDir = lastSlashIndex === -1 ? "/" : rawPath.substring(0, lastSlashIndex + 1);
+                    let fullFileName = lastSlashIndex === -1 ? rawPath : rawPath.substring(lastSlashIndex + 1);
+                    if (fullFileName.startsWith('/')) fullFileName = fullFileName.substring(1);
 
                     const lastDotIndex = fullFileName.lastIndexOf('.');
                     const nameWithoutExt = lastDotIndex !== -1 ? fullFileName.substring(0, lastDotIndex) : fullFileName;
@@ -89,15 +98,15 @@
                     const timestamp = Date.now();
                     const cleanUuid = generateCleanUUID();
                     
-                    // 计算纯净的文件名
+                    // 计算重命名的公共 OSS 文件名
                     const newFileName = `${nameWithoutExt}_${timestamp}_${cleanUuid}${fileExt}`;
-                    const finalVirtualPath = fileDir + fullFileName; // 网盘呈现的纯净多级虚拟地址
-                    const ossObjectKey = newFileName; // 🚨 锁死：OSS 真实端剥离一切层级，只是一个纯粹的不带斜杠的文件名！
+                    const finalVirtualPath = fileDir + fullFileName; 
+                    const ossObjectKey = newFileName; // 真实存储在 OSS 根目录，不带任何斜杠
 
                     const extPure = fileExt.replace('.', '').toLowerCase();
                     const contentType = (body && body.type) ? body.type : (mimeMap[extPure] || 'application/octet-stream');
 
-                    // 向云函数要凭证 (path参数传未处理的原URL保证兼容)
+                    // 向云函数要 STS 凭证
                     const cfResponse = await fetch(`/api/get_upload_sts?path=${encodeURIComponent(finalVirtualPath)}`);
                     const cfData = await cfResponse.json();
                     if (cfData.code !== 200) throw new Error("获取 STS 失败: " + cfData.message);
@@ -115,51 +124,75 @@
 
                     if (this.onloadstart) this.onloadstart();
 
-                    // 真实推入 OSS 根目录（由于 ossObjectKey 是纯文件名，绝对不带任何斜杠和多级目录前缀）
+                    // 执行真实 OSS 纯 PUT 上传
                     await client.put(ossObjectKey, body, {
                         headers: { 'Content-Type': contentType },
                         progress: (p) => {
+                            // 动态通知网页更新上传进度条
                             if (this.upload && this.upload.onprogress) {
                                 this.upload.onprogress({ lengthComputable: true, loaded: body.size * p, total: body.size });
                             }
                         }
                     });
 
-                    // ==========================================
-                    // 🚀 核心修复：上报时，不要再次进行多重 URL 编码
-                    // ==========================================
+                    // 上报 Serverless 进行 KV 虚拟文件系统登记，使其在列表现身并计算好 type 预览值
                     await fetch('/api/fs/register_file', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            path: finalVirtualPath, // 发送没有 %2F 的纯净字符串 "/91/xxx.jpg"
-                            name: fullFileName,     // 发送纯净字符串 "xxx.jpg"
+                            path: finalVirtualPath, 
+                            name: fullFileName,     
                             size: body.size,
-                            oss_key: ossObjectKey   // 发送没有层级的纯净随机文件名
+                            oss_key: ossObjectKey   
                         })
                     });
 
-                    // 状态机终结
+                    // 强制将进度拉满
                     if (this.upload && this.upload.onprogress) {
                         this.upload.onprogress({ lengthComputable: true, loaded: body.size, total: body.size });
                     }
 
+                    // ==========================================
+                    // 🚀 核心改动：100% 严格依照官方 OpenAPI 规范伪造 Task JSON 响应体
+                    // ==========================================
+                    const mockTaskId = generateTaskId();
+                    const mockTaskResponse = {
+                        "code": 200,
+                        "message": "success",
+                        "data": {
+                            "task": {
+                                "id": mockTaskId,
+                                "name": `upload ${fullFileName} to [${fileDir}]`,
+                                "state": 2, // 💡 绝杀点：将状态直接标为 2 (AList中通常2或3代表Succeeded成功)，直接跳过轮询，立刻结束任务！
+                                "status": "succeeded",
+                                "progress": 100,
+                                "error": ""
+                            }
+                        }
+                    };
+
+                    const jsonResultString = JSON.stringify(mockTaskResponse);
+
+                    // 重塑并锁定 XHR 关键成功属性字段，完美瞒过 AList 顶层的 Axios 状态机
                     Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
                     Object.defineProperty(this, 'status', { get: () => 200, configurable: true });
-                    Object.defineProperty(this, 'response', { get: () => '{"code":200,"message":"success","data":null}', configurable: true });
-                    Object.defineProperty(this, 'responseText', { get: () => '{"code":200,"message":"success","data":null}', configurable: true });
+                    Object.defineProperty(this, 'response', { get: () => jsonResultString, configurable: true });
+                    Object.defineProperty(this, 'responseText', { get: () => jsonResultString, configurable: true });
 
+                    // 派发原生事件，强行驱动 AList 刷新视图并优雅关闭右下角上传弹窗
                     if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
                     if (typeof this.onload === 'function') this.onload();
                     this.dispatchEvent(new Event('readystatechange'));
                     this.dispatchEvent(new Event('load'));
-                    return;
+                    
+                    console.log(`\u2705 [OSS Task Hook] ${fullFileName} 任务伪造终结成功!`);
+                    return; // 拦截切断，拒绝 originalSend 发射
 
                 } catch (e) {
-                    console.error("❌ [OSS Hook] 上传链条发生异常:", e);
+                    console.error("\u274c [OSS Task Hook] 上传链条发生异常:", e);
                     Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
                     Object.defineProperty(this, 'status', { get: () => 500, configurable: true });
-                    Object.defineProperty(this, 'responseText', { get: () => `{"code":500,"message":"${e.message}"}`, configurable: true });
+                    Object.defineProperty(this, 'responseText', { get: () => `{"code":500,"message":"${e.message}","data":null}`, configurable: true });
                     if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
                     if (this.onerror) this.onerror();
                     return;
