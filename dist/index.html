@@ -48,7 +48,6 @@
             'csv': 'text/csv', 'html': 'text/html'
         };
 
-        // 生成随机 11 位 AList 风格 Task ID
         function generateTaskId() {
             const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
             let result = '';
@@ -77,127 +76,154 @@
             originalSetRequestHeader.apply(this, arguments);
         };
 
-        XMLHttpRequest.prototype.send = async function(body) {
-            if ((this._url.includes('/api/fs/put') || this._url.includes('/api/fs/form')) && this._method === 'PUT') {
-                try {
-                    const headerPath = this._customHeaders['file-path'] || '/unknown_file';
-                    
-                    // 彻底解码路径
-                    const rawPath = decodeURIComponent(decodeURIComponent(headerPath));
-                    
-                    // 拆解纯净路径
-                    const lastSlashIndex = rawPath.lastIndexOf('/');
-                    const fileDir = lastSlashIndex === -1 ? "/" : rawPath.substring(0, lastSlashIndex + 1);
-                    let fullFileName = lastSlashIndex === -1 ? rawPath : rawPath.substring(lastSlashIndex + 1);
-                    if (fullFileName.startsWith('/')) fullFileName = fullFileName.substring(1);
+        XMLHttpRequest.prototype.send = function(body) {
+            const xhrContext = this;
 
-                    const lastDotIndex = fullFileName.lastIndexOf('.');
-                    const nameWithoutExt = lastDotIndex !== -1 ? fullFileName.substring(0, lastDotIndex) : fullFileName;
-                    const fileExt = lastDotIndex !== -1 ? fullFileName.substring(lastDotIndex) : '';
+            // 核心拦截：发现 AList 触发了文件 PUT 上传
+            if ((xhrContext._url.includes('/api/fs/put') || xhrContext._url.includes('/api/fs/form')) && xhrContext._method === 'PUT') {
+                
+                // 立即异步启动后台 OSS 真实直传逻辑，绝不阻塞当前的同步返回
+                (async () => {
+                    try {
+                        const headerPath = xhrContext._customHeaders['file-path'] || '/unknown_file';
+                        const rawPath = decodeURIComponent(decodeURIComponent(headerPath));
+                        
+                        const lastSlashIndex = rawPath.lastIndexOf('/');
+                        const fileDir = lastSlashIndex === -1 ? "/" : rawPath.substring(0, lastSlashIndex + 1);
+                        let fullFileName = lastSlashIndex === -1 ? rawPath : rawPath.substring(lastSlashIndex + 1);
+                        if (fullFileName.startsWith('/')) fullFileName = fullFileName.substring(1);
 
-                    const timestamp = Date.now();
-                    const cleanUuid = generateCleanUUID();
-                    
-                    // 计算重命名的公共 OSS 文件名
-                    const newFileName = `${nameWithoutExt}_${timestamp}_${cleanUuid}${fileExt}`;
-                    const finalVirtualPath = fileDir + fullFileName; 
-                    const ossObjectKey = newFileName; // 真实存储在 OSS 根目录，不带任何斜杠
+                        const lastDotIndex = fullFileName.lastIndexOf('.');
+                        const nameWithoutExt = lastDotIndex !== -1 ? fullFileName.substring(0, lastDotIndex) : fullFileName;
+                        const fileExt = lastDotIndex !== -1 ? fullFileName.substring(lastDotIndex) : '';
 
-                    const extPure = fileExt.replace('.', '').toLowerCase();
-                    const contentType = (body && body.type) ? body.type : (mimeMap[extPure] || 'application/octet-stream');
+                        const timestamp = Date.now();
+                        const cleanUuid = generateCleanUUID();
+                        
+                        // 构建纯净变量
+                        const newFileName = `${nameWithoutExt}_${timestamp}_${cleanUuid}${fileExt}`;
+                        const finalVirtualPath = fileDir + fullFileName; 
+                        const ossObjectKey = newFileName; // OSS 根目录干净文件名
 
-                    // 向云函数要 STS 凭证
-                    const cfResponse = await fetch(`/api/get_upload_sts?path=${encodeURIComponent(finalVirtualPath)}`);
-                    const cfData = await cfResponse.json();
-                    if (cfData.code !== 200) throw new Error("获取 STS 失败: " + cfData.message);
-                    const creds = cfData.data.credentials;
+                        const extPure = fileExt.replace('.', '').toLowerCase();
+                        const contentType = (body && body.type) ? body.type : (mimeMap[extPure] || 'application/octet-stream');
 
-                    // 初始化 OSS 客户端
-                    const client = new OSS({
-                        region: creds.region || 'oss-cn-hangzhou',
-                        accessKeyId: creds.AccessKeyId,
-                        accessKeySecret: creds.AccessKeySecret,
-                        stsToken: creds.SecurityToken,
-                        bucket: creds.bucket,
-                        secure: true
-                    });
+                        // 1. 向云函数请求 STS 凭证
+                        const cfResponse = await fetch(`/api/get_upload_sts?path=${encodeURIComponent(finalVirtualPath)}`);
+                        const cfData = await cfResponse.json();
+                        if (cfData.code !== 200) throw new Error("获取 STS 失败: " + cfData.message);
+                        const creds = cfData.data.credentials;
 
-                    if (this.onloadstart) this.onloadstart();
+                        // 2. 初始化 OSS 客户端
+                        const client = new OSS({
+                            region: creds.region || 'oss-cn-hangzhou',
+                            accessKeyId: creds.AccessKeyId,
+                            accessKeySecret: creds.AccessKeySecret,
+                            stsToken: creds.SecurityToken,
+                            bucket: creds.bucket,
+                            secure: true
+                        });
 
-                    // 执行真实 OSS 纯 PUT 上传
-                    await client.put(ossObjectKey, body, {
-                        headers: { 'Content-Type': contentType },
-                        progress: (p) => {
-                            // 动态通知网页更新上传进度条
-                            if (this.upload && this.upload.onprogress) {
-                                this.upload.onprogress({ lengthComputable: true, loaded: body.size * p, total: body.size });
+                        // 3. 执行真实标准 PUT 直传
+                        await client.put(ossObjectKey, body, {
+                            headers: { 'Content-Type': contentType },
+                            progress: (p) => {
+                                // 🚀 核心：实时修改 XHR 状态，回传真实进度给 AList 前端
+                                if (xhrContext.upload && xhrContext.upload.onprogress) {
+                                    xhrContext.upload.onprogress({
+                                        lengthComputable: true,
+                                        loaded: body.size * p,
+                                        total: body.size
+                                    });
+                                }
                             }
+                        });
+
+                        // 4. 直传 OSS 成功，上报云函数注册虚拟文件系统（VFS）
+                        await fetch('/api/fs/register_file', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                path: finalVirtualPath, 
+                                name: fullFileName,     
+                                size: body.size,
+                                oss_key: ossObjectKey   
+                            })
+                        });
+
+                        // 5. 🚀 全部彻底成功，将状态更新为完成
+                        if (xhrContext.upload && xhrContext.upload.onprogress) {
+                            xhrContext.upload.onprogress({ lengthComputable: true, loaded: body.size, total: body.size });
                         }
-                    });
 
-                    // 上报 Serverless 进行 KV 虚拟文件系统登记，使其在列表现身并计算好 type 预览值
-                    await fetch('/api/fs/register_file', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            path: finalVirtualPath, 
-                            name: fullFileName,     
-                            size: body.size,
-                            oss_key: ossObjectKey   
-                        })
-                    });
+                        // 再次更新最终规范成功响应，触发 AList 自动刷新
+                        const successTask = {
+                            "code": 200,
+                            "message": "success",
+                            "data": {
+                                "task": {
+                                    "id": xhrContext._mockTaskId,
+                                    "name": `upload ${fullFileName} to [${fileDir}]`,
+                                    "state": 2, // 状态 2 在 AList 中代表成功
+                                    "status": "succeeded",
+                                    "progress": 100,
+                                    "error": ""
+                                }
+                            }
+                        };
+                        const successJsonStr = JSON.stringify(successTask);
+                        Object.defineProperty(xhrContext, 'response', { get: () => successJsonStr, configurable: true });
+                        Object.defineProperty(xhrContext, 'responseText', { get: () => successJsonStr, configurable: true });
 
-                    // 强制将进度拉满
-                    if (this.upload && this.upload.onprogress) {
-                        this.upload.onprogress({ lengthComputable: true, loaded: body.size, total: body.size });
+                        // 触发完成回调
+                        if (typeof xhrContext.onload === 'function') xhrContext.onload();
+                        xhrContext.dispatchEvent(new Event('load'));
+
+                    } catch (e) {
+                        console.error("❌ [OSS Async Hook] 上传崩溃:", e);
+                        Object.defineProperty(xhrContext, 'status', { get: () => 500, configurable: true });
+                        Object.defineProperty(xhrContext, 'responseText', { get: () => `{"code":500,"message":"${e.message}"}`, configurable: true });
+                        if (xhrContext.onerror) xhrContext.onerror();
+                        xhrContext.dispatchEvent(new Event('error'));
                     }
+                })();
 
-                    // ==========================================
-                    // 🚀 核心改动：100% 严格依照官方 OpenAPI 规范伪造 Task JSON 响应体
-                    // ==========================================
-                    const mockTaskId = generateTaskId();
-                    const mockTaskResponse = {
-                        "code": 200,
-                        "message": "success",
-                        "data": {
-                            "task": {
-                                "id": mockTaskId,
-                                "name": `upload ${fullFileName} to [${fileDir}]`,
-                                "state": 2, // 💡 绝杀点：将状态直接标为 2 (AList中通常2或3代表Succeeded成功)，直接跳过轮询，立刻结束任务！
-                                "status": "succeeded",
-                                "progress": 100,
-                                "error": ""
-                            }
+                // ==========================================
+                // 🚀 核心破局点：【前置秒回】
+                // 绝对不等待上面的异步 OSS 直传，1毫秒内直接对齐 AList 规范返回初始 task
+                // ==========================================
+                xhrContext._mockTaskId = generateTaskId();
+                const initTaskResponse = {
+                    "code": 200,
+                    "message": "success",
+                    "data": {
+                        "task": {
+                            "id": xhrContext._mockTaskId,
+                            "name": "OSS Serverless Fast Upload Task",
+                            "state": 0, // 💡 0 代表正在上传中 (uploading)
+                            "status": "uploading",
+                            "progress": 0,
+                            "error": ""
                         }
-                    };
+                    }
+                };
+                
+                const initJsonStr = JSON.stringify(initTaskResponse);
 
-                    const jsonResultString = JSON.stringify(mockTaskResponse);
+                // 瞬间卡死 XHR 状态机为第 4 阶段成功状态，欺骗 Axios 让他拿数据去渲染 UI
+                Object.defineProperty(xhrContext, 'readyState', { get: () => 4, configurable: true });
+                Object.defineProperty(xhrContext, 'status', { get: () => 200, configurable: true });
+                Object.defineProperty(xhrContext, 'response', { get: () => initJsonStr, configurable: true });
+                Object.defineProperty(xhrContext, 'responseText', { get: () => initJsonStr, configurable: true });
 
-                    // 重塑并锁定 XHR 关键成功属性字段，完美瞒过 AList 顶层的 Axios 状态机
-                    Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
-                    Object.defineProperty(this, 'status', { get: () => 200, configurable: true });
-                    Object.defineProperty(this, 'response', { get: () => jsonResultString, configurable: true });
-                    Object.defineProperty(this, 'responseText', { get: () => jsonResultString, configurable: true });
-
-                    // 派发原生事件，强行驱动 AList 刷新视图并优雅关闭右下角上传弹窗
-                    if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
-                    if (typeof this.onload === 'function') this.onload();
-                    this.dispatchEvent(new Event('readystatechange'));
-                    this.dispatchEvent(new Event('load'));
-                    
-                    console.log(`\u2705 [OSS Task Hook] ${fullFileName} 任务伪造终结成功!`);
-                    return; // 拦截切断，拒绝 originalSend 发射
-
-                } catch (e) {
-                    console.error("\u274c [OSS Task Hook] 上传链条发生异常:", e);
-                    Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
-                    Object.defineProperty(this, 'status', { get: () => 500, configurable: true });
-                    Object.defineProperty(this, 'responseText', { get: () => `{"code":500,"message":"${e.message}","data":null}`, configurable: true });
-                    if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
-                    if (this.onerror) this.onerror();
-                    return;
-                }
+                // 瞬间触发 AList 开始接收响应的回调
+                if (typeof xhrContext.onreadystatechange === 'function') xhrContext.onreadystatechange();
+                xhrContext.dispatchEvent(new Event('readystatechange'));
+                
+                return; // 🛑 完美拦截，拒绝发往原后端网关
             }
+
+            // 其它普通请求完全放行
             originalSend.apply(this, arguments);
         };
     })();
