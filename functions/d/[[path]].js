@@ -72,12 +72,6 @@ export async function onRequest(context) {
         
         // 组装基础直链
         let redirectUrl = `${cleanDomain}${safeObjectKey.startsWith('/') ? '' : '/'}${safeObjectKey}`;
-        
-        const urlObj = new URL(context.request.url);
-        if (urlObj.pathname.startsWith('/d/')) {
-            const safeDownloadName = encodeURIComponent(fileMeta.name);
-            redirectUrl += `?response-content-disposition=attachment%3B%20filename%3D${safeDownloadName}`;
-        }
 
         // 返回 302 重定向
         return Response.redirect(redirectUrl, 302);
