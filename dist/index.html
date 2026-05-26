@@ -57,7 +57,7 @@
 
         // 从浏览器本地存储中捞出 AList 的登录令牌
         function getAlistToken() {
-            return window.localStorage.getItem('device_key') || '';
+            return window.localStorage.getItem('token') || '';
         }
 
         async function ensureStsCredentials() {
