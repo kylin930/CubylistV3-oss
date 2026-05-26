@@ -19,7 +19,7 @@
     ></script>
     <link       rel="shortcut icon"
       type="image/ico"
-      href="https://jsd.nn.ci/gh/alist-org/logo@main/logo.svg"
+      href="https://nnp.nekopara.us/favicon.ico"
     >
     <title>Loading...</title>
     <script>
@@ -233,6 +233,57 @@ document.getElementsByTagName(item.parentTagName)[0].appendChild(childNode);
 }
 })();
 </script>
+<!-- v4 -->
+
+<!-- 引入自定义字体 -->
+<link rel="stylesheet" href="https://s4.zstatic.net/ajax/libs/lxgw-wenkai-webfont/1.7.0/lxgwwenkai-regular.min.css">
+
+<style>
+    /* 移除原生视频控件 */
+    video::-webkit-media-controls {
+        display: none;
+    }
+
+    /* 设置背景图片样式 */
+    body {
+        background-repeat: no-repeat;
+        background-size: cover;
+        background-attachment: fixed;
+        background-position: center;
+    }
+
+    /* 在此处的url()里修改背景图片地址 */
+    /* 加了个深色遮罩，爱护你的眼睛 */
+    body.hope-ui-dark {
+        background-color: rgb(32, 36, 37);
+        background-image: linear-gradient(rgba(32, 36, 37, 0.7), rgba(32, 36, 37, 0.7)), url('https://cdn.mmoe.work/img/miku.webp');
+    }
+
+    /* 在此处的url()里修改背景图片地址 */
+    body.hope-ui-light {
+        background-image: url('https://cdn.mmoe.work/img/miku.webp');
+    }
+
+    /* 统一站点公告的样式 */
+    .hope-ui-light .hope-c-PJLV-ikJQsXT-css {
+        background: rgba(17, 6, 6, 0.8) !important;
+        backdrop-filter: blur(0) !important;
+    }
+
+    .hope-ui-dark .hope-c-PJLV-ikJQsXT-css {
+        background: rgb(32, 36, 37) !important;
+        backdrop-filter: blur(0) !important;
+    }
+
+    /* 自定义字体 */
+    * {
+        font-family: "LXGW WenKai", sans-serif;
+    }
+</style>
+
+<script
+    src="https://s4.zstatic.net/ajax/libs/js-polyfills/0.1.43/polyfill.min.js?features=String.prototype.replaceAll"></script>
+
 </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
@@ -240,6 +291,152 @@ document.getElementsByTagName(item.parentTagName)[0].appendChild(childNode);
 
     
     <!-- customize body -->
+     <!-- v6 -->
+
+    <!-- 修正部分区域的透明 -->
+    <style>
+        .hope-ui-light,
+        .hope-ui-dark {
+            --hope-colors-background: transparent;
+        }
+    </style>
+
+    <script type="module">
+        // v6
+
+        // 提供用来监听代码控制的 url 变化的事件
+        (() => {
+            const wrapHistoryMethod = (type) => {
+                const orig = history[type];
+                return function (...args) {
+                    const rv = orig.apply(this, args);
+                    const event = new CustomEvent(type, { detail: args });
+                    window.dispatchEvent(event);
+                    return rv;
+                };
+            };
+            history.pushState = wrapHistoryMethod('pushState');
+            history.replaceState = wrapHistoryMethod('replaceState');
+        })();
+
+        class Beautifier {
+            /**
+                * Beautifier 类用于美化页面背景色
+                * 
+                * 其提供了3个方法：
+                * - observe: 开始监听页面变化并美化背景色
+                * - disconnect: 停止监听页面变化
+                * - undo: 恢复页面背景色到默认状态
+                *
+                * 可以通过window.beautifier访问实例对象
+                * 
+            */
+            static ignoredSelectors = [
+                '.hope-tooltip', // 提示小标签及其装饰
+                '.hope-tooltip__arrow',
+                '.hope-checkbox__control',// 复选框
+                '.hope-modal__overlay', // 模态框遮罩 
+                '.hope-drawer__overlay', // 抽屉遮罩
+                '.hope-select__option', // 下拉选项
+                '.monaco-editor *', // 代码编辑器
+                'button:not(.hope-menu__trigger)', // 除目录外按钮
+                'svg' // SVG 图标
+            ];
+
+            static getSelector(mainSelector) {
+                return `${mainSelector} :not(${Beautifier.ignoredSelectors.join('):not(')})`;
+            }
+
+            static lightSelector = Beautifier.getSelector('.hope-ui-light');
+            static darkSelector = Beautifier.getSelector('.hope-ui-dark');
+
+            static lightBgColor = 'rgba(255, 255, 255, 0.8)';
+            static darkBgColor = 'rgb(32, 36, 37)';
+
+            static specificPrefix = 'rgba(132, 133, 141,';
+
+            constructor() {
+                this.observer = null;
+            }
+
+            /**
+             * @param {'light'|'dark'} theme
+             */
+            #rewriteStyle(theme) {
+                let selector = theme === 'light' ? Beautifier.lightSelector : Beautifier.darkSelector;
+                let bgColor = theme === 'light' ? Beautifier.lightBgColor : Beautifier.darkBgColor;
+
+                document.querySelectorAll(selector).forEach(element => {
+                    const computedStyle = getComputedStyle(element);
+
+                    if (computedStyle.backgroundColor !== 'rgba(0, 0, 0, 0)' &&
+                        !computedStyle.backgroundColor.startsWith(Beautifier.specificPrefix)) {
+                        element.style.backgroundColor = bgColor;
+
+                        element.setAttribute('data-beautified', 'true');
+                    }
+                });
+            }
+
+            #beautify() {
+                if (!location.pathname.startsWith('/@manage') && !location.pathname.startsWith('/@login')) {
+                    this.#rewriteStyle('light');
+                    this.#rewriteStyle('dark');
+                }
+            }
+
+            observe() {
+                this.observer = new MutationObserver(this.#beautify.bind(this));
+                this.observer.observe(document.body, {
+                    childList: true,
+                    subtree: true
+                });
+
+                this.#beautify();
+            }
+
+            disconnect() {
+                if (this.observer) {
+                    this.observer.disconnect();
+                }
+            }
+
+            undo() {
+                this.disconnect();
+
+                document.body.querySelectorAll('[data-beautified]').forEach(element => {
+                    element.style.backgroundColor = '';
+
+                    element.removeAttribute('data-beautified');
+                });
+            }
+        }
+
+        const beautifier = new Beautifier();
+        window.beautifier = beautifier;
+
+        beautifier.observe();
+
+        // 一个愚蠢到有点无敌的修复机制，不过工作良好
+        (() => {
+            function fixLogin(pathname) {
+                if (pathname.startsWith('/@login')) {
+                    beautifier.undo();
+                }
+                else {
+                    beautifier.disconnect();
+                    beautifier.observe();
+                }
+            }
+
+            ['popstate', 'pushState', 'replaceState'].forEach(eventType => {
+                addEventListener(eventType, () => {
+                    fixLogin(location.pathname);
+                });
+            });
+        })();
+    </script>
+
     <script nomodule>!function(){var e=document,t=e.createElement("script");if(!("noModule"in t)&&"onbeforeload"in t){var n=!1;e.addEventListener("beforeload",(function(e){if(e.target===t)n=!0;else if(!e.target.hasAttribute("nomodule")||!n)return;e.preventDefault()}),!0),t.type="module",t.src=".",e.head.appendChild(t),t.remove()}}();</script>
     <script nomodule crossorigin id="vite-legacy-polyfill" data-src="/assets/polyfills-legacy.fdb2f0b3.js">!(function() {
       var e = document.createElement('script')
