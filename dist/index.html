@@ -48,9 +48,6 @@
             'csv': 'text/csv', 'html': 'text/html'
         };
 
-        // ==========================================
-        // 🚀 核心优化 1：STS 凭证全局预热与自动续期池
-        // ==========================================
         let globalStsCredentials = null;
         let isFetchingSts = false;
         let stsPromise = null;
@@ -65,7 +62,6 @@
                 .then(data => {
                     if (data.code !== 200) throw new Error(data.message);
                     globalStsCredentials = data.data.credentials;
-                    console.log("✅ [STS Pool] 凭证预热就绪，可以零延迟直传！");
                     return globalStsCredentials;
                 })
                 .catch(err => {
@@ -77,9 +73,7 @@
             return await stsPromise;
         }
 
-        // 页面加载瞬间启动后台取 STS
         ensureStsCredentials().catch(()=>{});
-        // 每 15 分钟强行续期一次，保鲜
         setInterval(() => {
             globalStsCredentials = null;
             ensureStsCredentials().catch(()=>{});
@@ -107,9 +101,7 @@
         XMLHttpRequest.prototype.send = async function(body) {
             if ((this._url.includes('/api/fs/put') || this._url.includes('/api/fs/form')) && this._method === 'PUT') {
                 
-                // ==========================================
-                // 🚀 核心优化 2：原生 ProgressEvent 事件分发机
-                // ==========================================
+                // 原生 ProgressEvent 事件分发机
                 const dispatchProgress = (p) => {
                     if (this.upload) {
                         const loaded = Math.round(body.size * p);
@@ -135,7 +127,7 @@
                     const nameWithoutExt = lastDotIndex !== -1 ? fullFileName.substring(0, lastDotIndex) : fullFileName;
                     const fileExt = lastDotIndex !== -1 ? fullFileName.substring(lastDotIndex) : '';
 
-                    const newFileName = `${nameWithoutExt}_${Date.now()}_${generateCleanUUID()}${fileExt}`;
+                    const newFileName = `android${generateCleanUUID()}_${nameWithoutExt}${fileExt}`;
                     const finalVirtualPath = fileDir + fullFileName; 
                     const ossObjectKey = newFileName; 
 
@@ -181,9 +173,7 @@
                     dispatchProgress(1);
                     if (this.upload) this.upload.dispatchEvent(new ProgressEvent('loadend'));
 
-                    // ==========================================
-                    // 🚀 核心优化 3：回归 44 字节极简响应 + 状态机闭合
-                    // ==========================================
+                    // 回归 44 字节极简响应 + 状态机闭合
                     const jsonResultString = '{"code":200,"message":"success","data":null}';
 
                     Object.defineProperty(this, 'readyState', { get: () => 4, configurable: true });
