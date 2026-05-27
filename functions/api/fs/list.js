@@ -1,5 +1,4 @@
 export async function onRequest(context) {
-    // 处理跨域预检请求 (CORS)
     if (context.request.method === "OPTIONS") {
         return new Response(null, {
             status: 204,
@@ -14,33 +13,23 @@ export async function onRequest(context) {
     try {
         const authHeader = context.request.headers.get("Authorization") || "";
         const expectedAdminToken = context.env.ADMIN_TOKEN || "secret-admin-token-cf-alist-v3";
-        
-        // 判定当前操作者是否为合法的管理员
         const isAdmin = (authHeader === expectedAdminToken || authHeader === `Bearer ${expectedAdminToken}`);
 
-        // 解析前端传来的 POST 请求体
         const requestBody = await context.request.json();
-        let { path } = requestBody;
+        // 核心切入：动态提取分页参数，默认第1页，每页50条
+        let { path, page = 1, per_page = 50 } = requestBody;
 
-        if (!path) {
-            path = "/";
-        }
+        if (!path) path = "/";
 
-        // 规范化路径结构，强制解码防乱码
         let decodedPath = decodeURIComponent(decodeURIComponent(path));
-        if (!decodedPath.startsWith("/")) {
-            decodedPath = "/" + decodedPath;
-        }
-        if (decodedPath.length > 1 && decodedPath.endsWith("/")) {
-            decodedPath = decodedPath.slice(0, -1);
-        }
+        if (!decodedPath.startsWith("/")) decodedPath = "/" + decodedPath;
+        if (decodedPath.length > 1 && decodedPath.endsWith("/")) decodedPath = decodedPath.slice(0, -1);
 
         const kvNamespace = context.env.ALIST_KV;
         if (!kvNamespace) {
             throw new Error("ALIST_KV namespace is not bound.");
         }
 
-        // 从 KV 获取对应目录下的虚拟目录树
         const kvKey = `dir:${decodedPath}`;
         const dirDataStr = await kvNamespace.get(kvKey);
 
@@ -49,7 +38,6 @@ export async function onRequest(context) {
             content = JSON.parse(dirDataStr);
         }
 
-        // 严格映射数据字段
         const formattedContent = content.map(item => {
             const itemPath = item.path || (decodedPath === "/" ? `/${item.name}` : `${decodedPath}/${item.name}`);
             return {
@@ -69,13 +57,17 @@ export async function onRequest(context) {
             };
         });
 
-        // 组装最终响应体
+        const totalItems = formattedContent.length;
+        const startIndex = (page - 1) * per_page;
+        const endIndex = startIndex + per_page;
+        const paginatedContent = formattedContent.slice(startIndex, endIndex);
+
         const responseData = {
             "code": 200,
             "message": "success",
             "data": {
-                "content": formattedContent,
-                "total": formattedContent.length,
+                "content": paginatedContent, // 仅返回当前页的50条切片
+                "total": totalItems,         // 上报总数据量驱动前端计算总页数
                 "readme": "",
                 "write": isAdmin, 
                 "provider": "Cloudflare KV"
@@ -87,7 +79,7 @@ export async function onRequest(context) {
             headers: {
                 "Content-Type": "application/json;charset=utf-8",
                 "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "no-store" // 列表也禁缓存，防止多设备角色权限被节点误缓存缓存
+                "Cache-Control": "no-store" 
             }
         });
 

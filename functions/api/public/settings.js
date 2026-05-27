@@ -37,7 +37,7 @@ export async function onRequest(context) {
                 "preview_archives_by_default": "true",
                 "readme_autorender": "true",
                 "robots_txt": "User-agent: *\nAllow: /",
-                "search_index": "none",
+                "search_index": "bleve",
                 "settings_layout": "list",
                 "site_title": "CubylistV3",
                 "sso_compatibility_mode": "false",
