@@ -118,7 +118,6 @@ export async function onRequest(context) {
                 if (batchStmts.length >= BATCH_SIZE) {
                     await db.batch(batchStmts);
                     batchStmts = [];
-                    await sleep(50); // 核心放缓
                 }
             }
         } while (dirCursor);
