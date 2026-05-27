@@ -1,0 +1,1 @@
+CREATE TABLE vfs (id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, parent_path TEXT NOT NULL, name TEXT NOT NULL, is_dir INTEGER NOT NULL, size INTEGER DEFAULT 0, type INTEGER DEFAULT 0, oss_key TEXT, modified TEXT, created TEXT, thumb TEXT DEFAULT '', sign TEXT DEFAULT ''); CREATE INDEX idx_parent_path ON vfs(parent_path); CREATE INDEX idx_path ON vfs(path);

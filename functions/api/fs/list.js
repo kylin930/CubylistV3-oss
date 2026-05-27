@@ -1,13 +1,6 @@
 export async function onRequest(context) {
     if (context.request.method === "OPTIONS") {
-        return new Response(null, {
-            status: 204,
-            headers: {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization"
-            }
-        });
+        return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization" } });
     }
 
     try {
@@ -16,84 +9,46 @@ export async function onRequest(context) {
         const isAdmin = (authHeader === expectedAdminToken || authHeader === `Bearer ${expectedAdminToken}`);
 
         const requestBody = await context.request.json();
-        // 核心切入：动态提取分页参数，默认第1页，每页50条
         let { path, page = 1, per_page = 50 } = requestBody;
 
         if (!path) path = "/";
-
         let decodedPath = decodeURIComponent(decodeURIComponent(path));
         if (!decodedPath.startsWith("/")) decodedPath = "/" + decodedPath;
         if (decodedPath.length > 1 && decodedPath.endsWith("/")) decodedPath = decodedPath.slice(0, -1);
 
-        const kvNamespace = context.env.ALIST_KV;
-        if (!kvNamespace) {
-            throw new Error("ALIST_KV namespace is not bound.");
-        }
-
-        const kvKey = `dir:${decodedPath}`;
-        const dirDataStr = await kvNamespace.get(kvKey);
-
-        let content = [];
-        if (dirDataStr) {
-            content = JSON.parse(dirDataStr);
-        }
-
-        const formattedContent = content.map(item => {
-            const itemPath = item.path || (decodedPath === "/" ? `/${item.name}` : `${decodedPath}/${item.name}`);
-            return {
-                id: item.id || "",
-                path: itemPath,
-                name: item.name,
-                size: item.size || 0,
-                is_dir: !!item.is_dir,
-                modified: item.modified || new Date().toISOString(),
-                created: item.created || item.modified || new Date().toISOString(),
-                sign: item.sign || "",
-                thumb: item.thumb || "",
-                type: item.type || (item.is_dir ? 1 : 0),
-                hashinfo: "null",
-                hash_info: null,
-                label_list: null
-            };
-        });
-
-        const totalItems = formattedContent.length;
+        const db = context.env.ALIST_D1;
         const startIndex = (page - 1) * per_page;
-        const endIndex = startIndex + per_page;
-        const paginatedContent = formattedContent.slice(startIndex, endIndex);
 
-        const responseData = {
-            "code": 200,
-            "message": "success",
-            "data": {
-                "content": paginatedContent, // 仅返回当前页的50条切片
-                "total": totalItems,         // 上报总数据量驱动前端计算总页数
-                "readme": "",
-                "write": isAdmin, 
-                "provider": "Cloudflare KV"
-            }
-        };
+        const results = await db.batch([
+            db.prepare("SELECT count(*) as total FROM vfs WHERE parent_path = ?").bind(decodedPath),
+            db.prepare("SELECT * FROM vfs WHERE parent_path = ? ORDER BY is_dir DESC, name ASC LIMIT ? OFFSET ?").bind(decodedPath, per_page, startIndex)
+        ]);
 
-        return new Response(JSON.stringify(responseData), {
-            status: 200,
-            headers: {
-                "Content-Type": "application/json;charset=utf-8",
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "no-store" 
-            }
-        });
+        const totalItems = results[0].results[0].total || 0;
+        const dbItems = results[1].results || [];
+
+        const paginatedContent = dbItems.map(item => ({
+            id: item.id,
+            path: item.path,
+            name: item.name,
+            size: item.size,
+            is_dir: !!item.is_dir, 
+            modified: item.modified,
+            created: item.created,
+            sign: item.sign || "",
+            thumb: item.thumb || "",
+            type: item.type,
+            hashinfo: "null",
+            hash_info: null,
+            label_list: null
+        }));
+
+        return new Response(JSON.stringify({
+            "code": 200, "message": "success",
+            "data": { "content": paginatedContent, "total": totalItems, "readme": "", "write": isAdmin, "provider": "Cloudflare D1" }
+        }), { status: 200, headers: { "Content-Type": "application/json;charset=utf-8", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" } });
 
     } catch (error) {
-        return new Response(JSON.stringify({
-            code: 500,
-            message: "List VFS Error: " + error.message,
-            data: null
-        }), {
-            status: 500,
-            headers: {
-                "Content-Type": "application/json;charset=utf-8",
-                "Access-Control-Allow-Origin": "*"
-            }
-        });
+        return new Response(JSON.stringify({ code: 500, message: "List VFS Error: " + error.message, data: null }), { status: 500, headers: { "Content-Type": "application/json;charset=utf-8", "Access-Control-Allow-Origin": "*" } });
     }
 }

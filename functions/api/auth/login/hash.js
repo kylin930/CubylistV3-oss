@@ -15,8 +15,8 @@ export async function onRequest(context) {
         const { username, password } = requestBody;
 
         const expectedUsername = context.env.ADMIN_USERNAME || "admin";
-        const expectedPasswordHash = context.env.ADMIN_PASSWORD_HASH || "9b3d0f8c00d65963b8843cb12bbf476ea05caa2cf3d55970b75b7c80b4874321";
-        const adminToken = context.env.ADMIN_TOKEN || "secret-admin-token-cf-alist-v3";
+        const expectedPasswordHash = context.env.ADMIN_PASSWORD_HASH;
+        const adminToken = context.env.ADMIN_TOKEN;
 
         if (username === expectedUsername && password === expectedPasswordHash) {
             const successResponse = {
