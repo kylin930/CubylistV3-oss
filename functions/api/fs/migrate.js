@@ -1,12 +1,6 @@
-export async function onRequest(context) {
-    // 保护机制：确保只有管理员可以触发迁移（可根据需要决定是否启用）
-    const authHeader = context.request.headers.get("Authorization") || "";
-    const expectedAdminToken = context.env.ADMIN_TOKEN || "secret-admin-token-cf-alist-v3";
-    if (authHeader !== expectedAdminToken && authHeader !== `Bearer ${expectedAdminToken}`) {
-        // 注：测试时如果嫌麻烦，可以先临时把下面这行注释掉
-        // return new Response("Unauthorized", { status: 401 });
-    }
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+export async function onRequest(context) {
     const kv = context.env.ALIST_KV;
     const db = context.env.ALIST_D1;
 
@@ -18,33 +12,33 @@ export async function onRequest(context) {
         let totalFilesMigrated = 0;
         let totalDirsMigrated = 0;
         let batchStmts = [];
-        const BATCH_SIZE = 50; // D1 batch 建议每批 50-100 条，防止单次事务过大
+        const BATCH_SIZE = 30; // 适当调小每批大小，对 D1 更友好
 
-        // --- 第一步：迁移所有标准文件 (从 KV 的 file:* 键中提取) ---
+        // 用于在内存中记录已经处理过的路径，防止重复写入触发数据库冲突导致额度翻倍
+        const processedPaths = new Set();
+
+        // --- 第一步：迁移所有标准文件 ---
         let fileCursor = "";
         do {
-            // 列出所有以 file: 开头的键
             const listResult = await kv.list({ prefix: "file:", cursor: fileCursor });
             fileCursor = listResult.cursor;
 
             for (const keyItem of listResult.keys) {
                 const kvKey = keyItem.name;
-                // 提取出纯净的虚拟网盘路径
                 const decodedPath = kvKey.substring("file:".length);
                 
-                // 从路径中拆解出父级路径和当前文件名
+                if (processedPaths.has(decodedPath)) continue;
+
                 const lastSlashIndex = decodedPath.lastIndexOf("/");
                 const parentPath = lastSlashIndex === 0 ? "/" : decodedPath.substring(0, lastSlashIndex);
 
-                // 读取 KV 中的文件元数据
                 const fileMetaStr = await kv.get(kvKey);
                 if (fileMetaStr) {
                     const fileMeta = JSON.parse(fileMetaStr);
                     
-                    // 构造 D1 插入语句（使用 INSERT OR REPLACE 防止重复运行接口时报错）
                     batchStmts.push(
                         db.prepare(`
-                            INSERT OR REPLACE INTO vfs (id, path, parent_path, name, is_dir, size, type, oss_key, created, modified, thumb, sign)
+                            INSERT OR IGNORE INTO vfs (id, path, parent_path, name, is_dir, size, type, oss_key, created, modified, thumb, sign)
                             VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                         `).bind(
                             fileMeta.id || "file-" + Math.random().toString(36).substring(2, 10),
@@ -61,48 +55,49 @@ export async function onRequest(context) {
                         )
                     );
                     
+                    processedPaths.add(decodedPath);
                     totalFilesMigrated++;
                 }
 
-                // 达到分批大小，写入 D1
                 if (batchStmts.length >= BATCH_SIZE) {
                     await db.batch(batchStmts);
                     batchStmts = [];
+                    await sleep(50); // 核心：每次写入让出 50ms 时间片，防止 D1 锁死排队
                 }
             }
         } while (fileCursor);
 
-        // 提交剩余的文件记录
         if (batchStmts.length > 0) {
             await db.batch(batchStmts);
             batchStmts = [];
+            await sleep(50);
         }
 
 
-        // --- 第二步：迁移所有虚拟文件夹元数据 (从 KV 的 dir:* 键中提取) ---
+        // --- 第二步：迁移所有虚拟文件夹 (内存严格去重版) ---
         let dirCursor = "";
         do {
-            // 列出所有以 dir: 开头的键
             const listResult = await kv.list({ prefix: "dir:", cursor: dirCursor });
             dirCursor = listResult.cursor;
 
             for (const keyItem of listResult.keys) {
                 const kvKey = keyItem.name;
-                const parentPath = kvKey.substring("dir:".length); // 这其实是当前目录的父级目录路径
+                const parentPath = kvKey.substring("dir:".length);
 
                 const dirDataStr = await kv.get(kvKey);
                 if (dirDataStr) {
                     const dirList = JSON.parse(dirDataStr);
                     
-                    // 遍历该目录下的子项，筛选出其中属于“虚拟文件夹(is_dir: true)”的节点
                     for (const item of dirList) {
                         if (item.is_dir) {
-                            // 还原出这个子文件夹的完整路径
                             const currentFullPath = parentPath === "/" ? `/${item.name}` : `${parentPath}/${item.name}`;
+
+                            // 如果内存中已经记录过这个网盘路径，说明它已经被别的地方建立过了，直接跳过！
+                            if (processedPaths.has(currentFullPath)) continue;
 
                             batchStmts.push(
                                 db.prepare(`
-                                    INSERT OR REPLACE INTO vfs (id, path, parent_path, name, is_dir, size, type, created, modified, thumb, sign)
+                                    INSERT OR IGNORE INTO vfs (id, path, parent_path, name, is_dir, size, type, created, modified, thumb, sign)
                                     VALUES (?, ?, ?, ?, 1, 0, 1, ?, ?, '', '')
                                 `).bind(
                                     item.id || "dir-" + Math.random().toString(36).substring(2, 10),
@@ -114,46 +109,34 @@ export async function onRequest(context) {
                                 )
                             );
 
+                            processedPaths.add(currentFullPath);
                             totalDirsMigrated++;
                         }
                     }
                 }
 
-                // 达到分批大小，写入 D1
                 if (batchStmts.length >= BATCH_SIZE) {
                     await db.batch(batchStmts);
                     batchStmts = [];
+                    await sleep(50); // 核心放缓
                 }
             }
         } while (dirCursor);
 
-        // 提交剩余的文件夹记录
         if (batchStmts.length > 0) {
             await db.batch(batchStmts);
         }
 
-        // --- 返回迁移成功的报告 ---
         return new Response(JSON.stringify({
             code: 200,
             message: "数据迁移成功！",
             data: {
-                "已迁移文件数(Files)": totalFilesMigrated,
-                "已迁移文件夹数(Directories)": totalDirsMigrated,
-                "提示": "确认无误后，建议将此 migrate.js 文件从 functions 中删除，防止被他人重复调用。"
+                "已迁移文件数": totalFilesMigrated,
+                "已迁移文件夹数": totalDirsMigrated
             }
-        }), {
-            status: 200,
-            headers: { "Content-Type": "application/json;charset=utf-8", "Access-Control-Allow-Origin": "*" }
-        });
+        }), { status: 200, headers: { "Content-Type": "application/json;charset=utf-8" } });
 
     } catch (error) {
-        return new Response(JSON.stringify({
-            code: 500,
-            message: "迁移中断，错误信息: " + error.message,
-            data: null
-        }), {
-            status: 500,
-            headers: { "Content-Type": "application/json;charset=utf-8" }
-        });
+        return new Response(JSON.stringify({ code: 500, message: "错误: " + error.message }), { status: 500 });
     }
 }
