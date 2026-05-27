@@ -269,7 +269,7 @@ document.getElementsByTagName(item.parentTagName)[0].appendChild(childNode);
         display: none;
     }
 
-    /* 设置背景图片样式 */
+    /* 设置背景图片通用样式 */
     body {
         background-repeat: no-repeat;
         background-size: cover;
@@ -277,17 +277,33 @@ document.getElementsByTagName(item.parentTagName)[0].appendChild(childNode);
         background-position: center;
     }
 
-    /* 在此处的url()里修改背景图片地址 */
-    /* 加了个深色遮罩，爱护你的眼睛 */
+    /* 电脑端/桌面端样式*/
+    
+    /* 暗黑模式 - 电脑端 */
     body.hope-ui-dark {
         background-color: rgb(32, 36, 37);
-        background-image: linear-gradient(rgba(32, 36, 37, 0.7), rgba(32, 36, 37, 0.7)), url('https://cdn.mmoe.work/img/miku.webp');
+        background-image: linear-gradient(rgba(32, 36, 37, 0.7), rgba(32, 36, 37, 0.7)), url('https://vanthink.oss-cn-qingdao.aliyuncs.com/androide0316b87140a55fde2343666ae1f671e_bRQL3-1725727712649-neko4_n01a.png');
     }
 
-    /* 在此处的url()里修改背景图片地址 */
+    /* 明亮模式 - 电脑端 */
     body.hope-ui-light {
         background-image: url('https://vanthink.oss-cn-qingdao.aliyuncs.com/4cqgH-1725727607219-cgex_12a_l_1779724156254_afe8f786aec20f4af0421debed57a32e.png');
     }
+
+
+    /* 移动端样式 (当屏幕宽度小于或等于 768px 时生效) */
+    @media screen and (max-width: 768px) {
+        /* 暗黑模式 - 移动端 */
+        body.hope-ui-dark {
+            background-image: linear-gradient(rgba(32, 36, 37, 0.7), rgba(32, 36, 37, 0.7)), url('https://teachermate.oss-cn-qingdao.aliyuncs.com/7p8eW-1759718889324-phone_background.jpg');
+        }
+
+        /* 明亮模式 - 移动端 */
+        body.hope-ui-light {
+            background-image: url('https://teachermate.oss-cn-qingdao.aliyuncs.com/7p8eW-1759718889324-phone_background.jpg');
+        }
+    }
+
 
     /* 统一站点公告的样式 */
     .hope-ui-light .hope-c-PJLV-ikJQsXT-css {

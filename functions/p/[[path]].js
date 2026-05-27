@@ -1,5 +1,4 @@
 export async function onRequest(context) {
-    // 处理跨域预检请求
     if (context.request.method === "OPTIONS") {
         return new Response(null, {
             status: 204,
@@ -11,49 +10,26 @@ export async function onRequest(context) {
         });
     }
 
-    // 重定向接口只接受 GET 请求
     if (context.request.method !== "GET") {
         return new Response("Method Not Allowed", { status: 405 });
     }
 
     try {
-        // 1. 获取动态路由参数并拼接成完整虚拟路径
-        // 在 Cloudflare Pages 中，[[path]].js 会把后续的路径切分成数组
-        // 例如 /d/a/b.png -> context.params.path = ['a', 'b.png']
         const pathArray = context.params.path;
         if (!pathArray || pathArray.length === 0) {
             return new Response("Bad Request: Empty path", { status: 400 });
         }
 
-        // 拼接路径并前置强制解码，防止前端传来的 %2F 导致匹配失败
         let virtualPath = "/" + pathArray.join("/");
         virtualPath = decodeURIComponent(virtualPath);
 
-        const kv = context.env.ALIST_KV;
-        if (!kv) throw new Error("ALIST_KV namespace is not bound.");
+        const db = context.env.ALIST_D1;
+        if (!db) throw new Error("ALIST_D1 namespace is not bound.");
 
-        // 2. 从 KV 虚拟文件系统中精准捞取文件元数据
-        let fileMeta = null;
-        
-        // 优先检索独立文件键
-        const fileMetaStr = await kv.get(`file:${virtualPath}`);
-        if (fileMetaStr) {
-            fileMeta = JSON.parse(fileMetaStr);
-        } else {
-            // 兜底策略：从父级目录反向检索
-            const lastSlashIndex = virtualPath.lastIndexOf("/");
-            const parentPath = lastSlashIndex === 0 ? "/" : virtualPath.substring(0, lastSlashIndex);
-            const fileName = virtualPath.substring(lastSlashIndex + 1);
+        // D1 一击必中：通过路径直接提取文件元数据（且必须是文件，不能是目录）
+        const stmt = db.prepare("SELECT * FROM vfs WHERE path = ? AND is_dir = 0").bind(virtualPath);
+        const fileMeta = await stmt.first();
 
-            const dirDataStr = await kv.get(`dir:${parentPath}`);
-            if (dirDataStr) {
-                const dirList = JSON.parse(dirDataStr);
-                const matchedItem = dirList.find(item => item.name === fileName && !item.is_dir);
-                if (matchedItem) fileMeta = matchedItem;
-            }
-        }
-
-        // 3. 文件不存在，返回 404 纯文本
         if (!fileMeta) {
             return new Response("404 Not Found: The requested file does not exist in VFS.", { 
                 status: 404,
@@ -61,19 +37,15 @@ export async function onRequest(context) {
             });
         }
 
-        // 4. 拼装真实的 OSS 直链
         const publicDomain = context.env.OSS_PUBLIC_DOMAIN;
         if (!publicDomain) throw new Error("OSS_PUBLIC_DOMAIN environment variable is missing.");
         const cleanDomain = publicDomain.endsWith('/') ? publicDomain.slice(0, -1) : publicDomain;
         
-        // 提取真实的 OSS 文件键（我们在 Hook 里存在根目录的那个无斜杠的名称）
         const ossKey = fileMeta.oss_key || virtualPath;
         const safeObjectKey = ossKey.split('/').map(segment => encodeURIComponent(segment)).join('/');
         
-        // 组装基础直链
         let redirectUrl = `${cleanDomain}${safeObjectKey.startsWith('/') ? '' : '/'}${safeObjectKey}`;
 
-        // 返回 302 重定向
         return Response.redirect(redirectUrl, 302);
 
     } catch (error) {

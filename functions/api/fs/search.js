@@ -58,10 +58,11 @@ export async function onRequest(context) {
         const totalItems = results[0].results[0].total || 0;
         const dbItems = results[1].results || [];
 
-        // 4. 组装 AList 期待的数据结构（与 list 接口高度一致）
+        // 4. 组装 AList 期待的数据结构
         const paginatedContent = dbItems.map(item => ({
             id: item.id,
             path: item.path,
+            parent: item.parent_path,
             name: item.name,
             size: item.size,
             is_dir: !!item.is_dir,
